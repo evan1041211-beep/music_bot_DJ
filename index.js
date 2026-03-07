@@ -83,7 +83,10 @@ client.on("interactionCreate", async interaction => {
 
 async function playSong(guild, song) {
     const serverQueue = queue.get(guild.id);
-    if (!song) { serverQueue.connection.destroy(); queue.delete(guild.id); return; }
+    if (!song) {
+    console.log("🎶 歌播完了，但我會繼續待在頻道裡等新歌。");
+    return; // 直接結束函數，不執行 destroy
+}}
 
     try {
         const stream = await play.stream(song.url);
