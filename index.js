@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActionRowBuilder, StringSelectMenuBuilder, ComponentType } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActionRowBuilder, StringSelectMenuBuilder, ComponentType, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
 const play = require('play-dl');
 
@@ -9,157 +9,177 @@ const GUILD_ID = process.env.GUILD_ID;
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const queue = new Map();
 
+// --- 輔助工具：製作進度條 ---
+function createProgressBar(current, total) {
+    const size = 15; // 進度條長度
+    const progress = Math.round((size * current) / total);
+    const emptyProgress = size - progress;
+    const progressText = '▇'.repeat(progress);
+    const emptyProgressText = '—'.repeat(emptyProgress);
+    const percentage = Math.round((current / total) * 100);
+    return `\`${progressText}${emptyProgressText}\` [${percentage}%]`;
+}
+
 // --- 自動抓取 Token ---
 async function refreshSoundCloudToken() {
     try {
         const client_id = await play.getFreeClientID();
         if (client_id) {
             await play.setToken({ soundcloud: { client_id: client_id } });
-            console.log("✅ SoundCloud 自動獲取 ID 成功！");
+            console.log("✅ SoundCloud Token 自動刷新成功");
         }
-    } catch (err) {
-        console.error("❌ 自動獲取 SoundCloud ID 失敗:", err.message);
-    }
+    } catch (err) { console.error("❌ Token 刷新失敗:", err.message); }
 }
 
 // --- 指令註冊 ---
 const commands = [
-    new SlashCommandBuilder().setName("play").setDescription("播放音樂 (選單或連結)").addStringOption(opt => opt.setName("song").setDescription("輸入歌名或連結").setRequired(true)),
-    new SlashCommandBuilder().setName("skip").setDescription("跳過目前的歌曲"),
-    new SlashCommandBuilder().setName("stop").setDescription("停止播放並清空清單"),
-    new SlashCommandBuilder().setName("leave").setDescription("離開語音頻道")
+    new SlashCommandBuilder().setName("play").setDescription("播放音樂").addStringOption(o => o.setName("song").setDescription("關鍵字或連結").setRequired(true)),
+    new SlashCommandBuilder().setName("nowplaying").setDescription("顯示目前進度"),
+    new SlashCommandBuilder().setName("leave").setDescription("離開頻道")
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 (async () => {
     try {
         await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-        console.log("✅ 指令同步成功");
-    } catch (error) { console.error(error); }
+    } catch (e) { console.error(e); }
 })();
 
 client.once("ready", async () => {
-    console.log(`🤖 Bot ${client.user.tag} 已上線！`);
+    console.log(`🤖 ${client.user.tag} 播放器已準備就緒！`);
     await refreshSoundCloudToken();
 });
 
-// --- 指令處理 ---
+// --- 指令與按鈕處理 ---
 client.on("interactionCreate", async (interaction) => {
+    const serverQueue = queue.get(interaction.guildId);
+
+    // 處理按鈕點擊
+    if (interaction.isButton()) {
+        if (!serverQueue) return interaction.reply({ content: "目前沒有音樂在播放", ephemeral: true });
+        
+        switch (interaction.customId) {
+            case 'pause_resume':
+                if (serverQueue.player.state.status === AudioPlayerStatus.Paused) {
+                    serverQueue.player.unpause();
+                    await interaction.reply({ content: "▶️ 恢復播放", ephemeral: true });
+                } else {
+                    serverQueue.player.pause();
+                    await interaction.reply({ content: "⏸ 暫停播放", ephemeral: true });
+                }
+                break;
+            case 'skip':
+                serverQueue.player.stop();
+                await interaction.reply({ content: "⏭ 已跳過", ephemeral: true });
+                break;
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
     const { commandName, guild, member, options } = interaction;
 
     if (commandName === "play") {
-        if (!member.voice.channel) return interaction.reply("❌ 你得先進入語音頻道！");
+        if (!member.voice.channel) return interaction.reply("❌ 你得先在語音頻道");
         await interaction.deferReply();
         await refreshSoundCloudToken();
 
         const query = options.getString("song");
-        let serverQueue = queue.get(guild.id);
-
-        // --- 修正點：改用 play.validate 判斷連結 ---
         const checkType = await play.validate(query);
-        const isSoLink = checkType === 'so_track';
 
-        if (isSoLink) {
-            try {
-                const songInfo = await play.soundcloud(query);
-                if (!serverQueue) {
-                    serverQueue = createQueue(interaction);
-                    queue.set(guild.id, serverQueue);
-                }
-                serverQueue.songs.push(songInfo);
-                await interaction.editReply(`✅ 已加入連結歌曲: **${songInfo.name || songInfo.title || "未知曲名"}**`);
-                if (serverQueue.songs.length === 1) playSong(guild, serverQueue.songs[0]);
-                return;
-            } catch (err) {
-                console.error(err);
-                return interaction.editReply("❌ 無法解析連結。");
-            }
-        }
-
-        // --- 關鍵字搜尋模式 ---
         try {
-            const results = await play.search(query, { limit: 5, source: { soundcloud: "tracks" } });
-            if (!results.length) return interaction.editReply("❌ 找不到音樂。");
+            let songInfo;
+            if (checkType === 'so_track') {
+                songInfo = await play.soundcloud(query);
+            } else {
+                const results = await play.search(query, { limit: 1, source: { soundcloud: "tracks" } });
+                if (!results.length) return interaction.editReply("❌ 找不到音樂");
+                songInfo = results[0];
+            }
 
-            const selectMenu = new StringSelectMenuBuilder()
-                .setCustomId('select_song')
-                .setPlaceholder('🎵 請選擇一首歌...')
-                .addOptions(results.map(s => ({
-                    label: (s.name || s.title || "未知曲名").toString().substring(0, 100),
-                    description: `時長: ${s.durationRaw || '未知'}`,
-                    value: s.url,
-                })));
+            let q = queue.get(guild.id);
+            if (!q) {
+                q = {
+                    connection: joinVoiceChannel({
+                        channelId: member.voice.channel.id,
+                        guildId: guild.id,
+                        adapterCreator: guild.voiceAdapterCreator,
+                    }),
+                    player: createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } }),
+                    songs: [],
+                    currentResource: null
+                };
+                q.connection.subscribe(q.player);
+                queue.set(guild.id, q);
+            }
 
-            const row = new ActionRowBuilder().addComponents(selectMenu);
-            const msg = await interaction.editReply({ content: `🔍 找到結果：`, components: [row] });
-
-            const collector = msg.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 30000 });
-
-            collector.on('collect', async i => {
-                if (i.user.id !== interaction.user.id) return i.reply({ content: "這不是你的選單", ephemeral: true });
-                const selectedSong = results.find(s => s.url === i.values[0]);
-                
-                if (!serverQueue) {
-                    serverQueue = createQueue(interaction);
-                    queue.set(guild.id, serverQueue);
-                }
-
-                serverQueue.songs.push(selectedSong);
-                await i.update({ content: `✅ 已加入隊列: **${selectedSong.name || selectedSong.title || "未知曲名"}**`, components: [] });
-                if (serverQueue.songs.length === 1) playSong(guild, serverQueue.songs[0]);
-            });
-        } catch (err) {
-            console.error(err);
-            interaction.editReply("❌ 搜尋失敗。");
+            q.songs.push(songInfo);
+            if (q.songs.length === 1) {
+                playSong(guild, q.songs[0]);
+                await interaction.editReply(`🎵 開始播放: **${songInfo.name || songInfo.title}**`);
+            } else {
+                await interaction.editReply(`✅ 已加入隊列: **${songInfo.name || songInfo.title}**`);
+            }
+        } catch (e) {
+            console.error(e);
+            interaction.editReply("❌ 發生錯誤");
         }
     }
 
-    const serverQueue = queue.get(guild.id);
-    if (!serverQueue && ["skip", "stop", "leave"].includes(commandName)) {
-        if (!interaction.replied) return interaction.reply("❌ 目前沒音樂。");
-        return;
+    if (commandName === "nowplaying") {
+        if (!serverQueue || !serverQueue.currentResource) return interaction.reply("目前沒有音樂在播放");
+        
+        const song = serverQueue.songs[0];
+        const cur = Math.floor(serverQueue.currentResource.playbackDuration / 1000); // 秒
+        const total = song.durationInSec || (song.durationInMs / 1000) || 0;
+        
+        const embed = new EmbedBuilder()
+            .setColor('#ff5500')
+            .setTitle(`🎶 正在播放: ${song.name || song.title}`)
+            .setDescription(`${createProgressBar(cur, total)}\n\`${formatTime(cur)} / ${formatTime(total)}\``);
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('pause_resume').setLabel('暫停/恢復').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('skip').setLabel('跳過').setStyle(ButtonStyle.Danger)
+        );
+
+        interaction.reply({ embeds: [embed], components: [row] });
     }
 
-    if (commandName === "skip") { serverQueue.player.stop(); interaction.reply("⏭ 已跳過"); }
-    if (commandName === "stop") { serverQueue.songs = []; serverQueue.player.stop(); interaction.reply("⏹ 已清空隊列。"); }
-    if (commandName === "leave") { serverQueue.connection.destroy(); queue.delete(guild.id); interaction.reply("👋 掰掰！"); }
+    if (commandName === "leave") {
+        serverQueue?.connection.destroy();
+        queue.delete(guild.id);
+        interaction.reply("👋 掰掰！");
+    }
 });
 
-// --- 輔助功能 ---
-function createQueue(interaction) {
-    const q = {
-        textChannel: interaction.channel,
-        connection: joinVoiceChannel({
-            channelId: interaction.member.voice.channel.id,
-            guildId: interaction.guild.id,
-            adapterCreator: interaction.guild.voiceAdapterCreator,
-        }),
-        player: createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } }),
-        songs: []
-    };
-    q.connection.subscribe(q.player);
-    return q;
-}
-
+// --- 核心播放邏輯 ---
 async function playSong(guild, song) {
     const serverQueue = queue.get(guild.id);
-    if (!song) return console.log("🎶 播放結束，待命中...");
+    if (!song) return;
 
     try {
         const stream = await play.stream(song.url, { discordPlayerCompatibility: true });
         const resource = createAudioResource(stream.stream, { inputType: stream.type });
+        serverQueue.currentResource = resource;
         serverQueue.player.play(resource);
 
         serverQueue.player.once(AudioPlayerStatus.Idle, () => {
             serverQueue.songs.shift();
             playSong(guild, serverQueue.songs[0]);
         });
-    } catch (err) {
-        console.error(err);
+    } catch (e) {
+        console.error(e);
         serverQueue.songs.shift();
         playSong(guild, serverQueue.songs[0]);
     }
+}
+
+function formatTime(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return [h, m, s].map(v => v.toString().padStart(2, '0')).filter((v, i) => v !== '00' || i > 0).join(':');
 }
 
 client.login(TOKEN);
