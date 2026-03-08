@@ -1,135 +1,125 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
 const play = require('play-dl');
 
-// ================= 設定區 (Railway 變數) =================
+// --- 1. 設定區 (從 Railway 或 .env 讀取) ---
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+const client = new Client({ 
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildVoiceStates,
+    ] 
+});
+
 const queue = new Map();
 
-// ================= 指令定義 =================
+// --- 2. 註冊音樂指令 ---
 const commands = [
-    new SlashCommandBuilder().setName("play").setDescription("播放音樂").addStringOption(opt => opt.setName("song").setDescription("歌名").setRequired(true)),
-    new SlashCommandBuilder().setName("skip").setDescription("跳過歌曲"),
-    new SlashCommandBuilder().setName("stop").setDescription("停止播放"),
-    new SlashCommandBuilder().setName("leave").setDescription("離開語音頻道")
+    new SlashCommandBuilder().setName("play").setDescription("播放 YouTube 音樂")
+        .addStringOption(o => o.setName("song").setDescription("輸入歌名或 YouTube 網址").setRequired(true)),
+    new SlashCommandBuilder().setName("skip").setDescription("跳過目前的歌曲"),
+    new SlashCommandBuilder().setName("stop").setDescription("停止播放並清空隊列"),
+    new SlashCommandBuilder().setName("leave").setDescription("讓機器人離開語音頻道")
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 (async () => {
-    try { await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands }); } catch (error) { console.error(error); }
+    try {
+        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+        console.log("✅ 音樂指令已更新");
+    } catch (e) { console.error(e); }
 })();
 
-// ================= 啟動事件 =================
-client.once("ready", async () => {
-    console.log(`🤖 Bot ${client.user.tag} 已上線！`);
-    try {
-        const client_id = await play.getFreeClientID();
-        play.setToken({ soundcloud: { client_id: client_id } });
-        console.log("✅ SoundCloud 通行證就緒！");
-    } catch (err) { console.error("SoundCloud Token 取得失敗:", err); }
-});
+// --- 3. 指令處理器 ---
+client.on("interactionCreate", async i => {
+    if (!i.isChatInputCommand()) return;
+    const { commandName, guild, member, options } = i;
 
-// ================= 指令處理 =================
-client.on("interactionCreate", async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-    const { commandName, guild, member, options } = interaction;
     const voiceChannel = member.voice.channel;
+    if (!voiceChannel) return i.reply("❌ 你必須先進入語音頻道才能點歌！");
+
+    let serverQueue = queue.get(guild.id);
 
     if (commandName === "play") {
-        if (!voiceChannel) return interaction.reply("❌ 請先加入語音頻道！");
-        await interaction.reply("🔍 搜尋中...");
+        await i.reply("🔍 正在搜尋 YouTube...");
         
-        let serverQueue = queue.get(guild.id);
         if (!serverQueue) {
             serverQueue = {
-                textChannel: interaction.channel, 
-                connection: null,
+                connection: joinVoiceChannel({
+                    channelId: voiceChannel.id,
+                    guildId: guild.id,
+                    adapterCreator: guild.voiceAdapterCreator,
+                }),
                 player: createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } }),
                 songs: []
             };
+            serverQueue.connection.subscribe(serverQueue.player);
             queue.set(guild.id, serverQueue);
-            serverQueue.connection = joinVoiceChannel({
-                channelId: voiceChannel.id, guildId: guild.id, adapterCreator: guild.voiceAdapterCreator
-            });
         }
 
         try {
             const query = options.getString("song");
-            const results = await play.search(query, { limit: 1, source: { soundcloud: "tracks" } });
-            if (!results.length) return interaction.editReply("❌ 找不到該歌曲");
-            
-            const song = { title: results[0].name, url: results[0].url };
+            // 搜尋 YouTube
+            const res = await play.search(query, { limit: 1, source: { youtube: "video" } });
+            if (!res.length) return i.editReply("❌ 找不到音樂。");
+
+            const song = { title: res[0].title, url: res[0].url };
             serverQueue.songs.push(song);
-            interaction.editReply(`✅ 已加入隊列: **${song.title}**`);
 
-            if (serverQueue.songs.length === 1) {
-                // 💡 呼叫播放函數
-                playSong(guild, serverQueue.songs[0]);
-            }
-        } catch (err) {
-            console.error(err);
-            interaction.editReply("❌ 搜尋失敗");
+            i.editReply(`✅ 已加入：**${song.title}**`);
+            if (serverQueue.songs.length === 1) playMusic(guild, serverQueue.songs[0]);
+
+        } catch (e) {
+            console.error(e);
+            i.editReply("❌ 播放出錯，請再試一次。");
         }
-        return;
     }
 
-    const serverQueue = queue.get(guild.id);
-    if (!serverQueue) return interaction.reply("❌ 目前沒有音樂在播放");
+    if (commandName === "skip") {
+        if (!serverQueue) return i.reply("❌ 目前沒有正在播放的歌曲。");
+        serverQueue.player.stop();
+        i.reply("⏭ 已跳過！");
+    }
 
-    if (commandName === "skip") { 
-        serverQueue.player.stop(); 
-        interaction.reply("⏭ 已跳過歌曲"); 
+    if (commandName === "stop") {
+        if (!serverQueue) return i.reply("❌ 目前沒有正在播放的歌曲。");
+        serverQueue.songs = [];
+        serverQueue.player.stop();
+        i.reply("⏹ 播放已停止。");
     }
-    if (commandName === "stop") { 
-        serverQueue.songs = []; 
-        serverQueue.player.stop(); 
-        interaction.reply("⏹ 已清空清單，我會留在頻道待命。"); 
-    }
-    if (commandName === "leave") { 
-        serverQueue.connection.destroy(); 
-        queue.delete(guild.id); 
-        interaction.reply("👋 再見！"); 
+
+    if (commandName === "leave") {
+        if (!serverQueue) return i.reply("❌ 我不在語音頻道中。");
+        serverQueue.connection.destroy();
+        queue.delete(guild.id);
+        i.reply("👋 下次見！");
     }
 });
 
-// ================= 核心播放函數 (已修正 async 標籤) =================
-async function playSong(guild, song) {
+// --- 4. 播放函數 ---
+async function playMusic(guild, song) {
     const serverQueue = queue.get(guild.id);
-    if (!serverQueue) return;
-
-    // 💡 這裡就是讓它「不退出」的關鍵：沒歌了就 Return，不執行 destroy()
-    if (!song) {
-        console.log("🎶 音樂播完了，保持連線中...");
-        return; 
-    }
+    if (!song) return; // 播完後留在頻道內不離開
 
     try {
-        const stream = await play.stream(song.url);
+        const stream = await play.stream(song.url, { discordPlayerCompatibility: true });
         const resource = createAudioResource(stream.stream, { inputType: stream.type });
-        serverQueue.connection.subscribe(serverQueue.player);
         serverQueue.player.play(resource);
 
-        // 監聽播放器進入閒置 (播完了)
+        // 當這首歌播完，自動播下一首
         serverQueue.player.once(AudioPlayerStatus.Idle, () => {
-            serverQueue.songs.shift(); 
-            playSong(guild, serverQueue.songs[0]); 
-        });
-
-        // 監聽錯誤以免當機
-        serverQueue.player.once('error', error => {
-            console.error(`播放錯誤: ${error.message}`);
             serverQueue.songs.shift();
-            playSong(guild, serverQueue.songs[0]);
+            playMusic(guild, serverQueue.songs[0]);
         });
-    } catch (err) {
-        console.error(`串流失敗: ${err.message}`);
+    } catch (e) {
+        console.error("播放發生錯誤:", e);
         serverQueue.songs.shift();
-        playSong(guild, serverQueue.songs[0]);
+        playMusic(guild, serverQueue.songs[0]);
     }
 }
 
+client.once("ready", () => console.log(`🎵 音樂機器人 ${client.user.tag} 在線！`));
 client.login(TOKEN);
