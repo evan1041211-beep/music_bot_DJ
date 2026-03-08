@@ -12,27 +12,26 @@ const client = new Client({
 
 const queue = new Map();
 
-// --- 💡 終極修正：Base64 解碼 + 非法字元強制過濾 ---
+// --- 💡 修正：直接還原 Base64 並傳入 ---
 (async () => {
     if (process.env.cookies) {
         try {
             // 1. 解碼 Base64
-            let decodedCookie = Buffer.from(process.env.cookies, 'base64').toString('utf-8');
+            const decodedCookie = Buffer.from(process.env.cookies, 'base64').toString('utf-8');
 
-            // 2. 強制過濾所有非 ASCII 或控制字元 (只保留可列印字元)
-            // 這能修復 "Invalid character in header content" 錯誤
-            const cleanCookie = decodedCookie.replace(/[^\x20-\x7E]/g, "");
-
+            // 2. 測試是否為有效的 JSON，並直接傳入
+            // 注意：這裡我們直接傳入 string，play-dl 會處理剩下的事
             await play.setToken({
-                youtube: { cookie: cleanCookie }
+                youtube: {
+                    cookie: decodedCookie.trim() 
+                }
             });
-            console.log("✅ YouTube Cookie 已過濾非法字元並成功載入");
+            console.log("✅ YouTube Cookie 載入成功");
         } catch (e) {
-            console.error("❌ Cookie 載入失敗:", e.message);
+            console.error("❌ Cookie 設定失敗:", e.message);
         }
     }
 })();
-
 const commands = [
     new SlashCommandBuilder().setName("play").setDescription("播放 YouTube 音樂").addStringOption(o => o.setName("song").setDescription("歌名或網址").setRequired(true)),
     new SlashCommandBuilder().setName("skip").setDescription("跳過"),
