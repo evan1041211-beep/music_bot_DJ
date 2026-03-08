@@ -84,14 +84,20 @@ client.on("interactionCreate", async interaction => {
             
             if (!results.length) return interaction.editReply("❌ 找不到相關音樂 (可能需要更新 ID)");
 
+            // --- 修正後的選單代碼 ---
             const selectMenu = new StringSelectMenuBuilder()
                 .setCustomId('select_song')
                 .setPlaceholder('🎵 請選擇歌曲播放...')
-                .addOptions(results.map(s => ({
-                    label: s.title.substring(0, 100),
-                    description: `時長: ${s.durationRaw}`,
-                    value: s.url,
-                })));
+                .addOptions(results.map(s => {
+                    // 確保 title 存在，如果不存在就給它一個預設名稱
+                    const safeTitle = (s.title || "未知曲名").toString();
+                    
+                    return {
+                        label: safeTitle.substring(0, 100), // 現在安全了
+                        description: `時長: ${s.durationRaw || '未知'}`,
+                        value: s.url,
+                    };
+                }));
 
             const row = new ActionRowBuilder().addComponents(selectMenu);
             const msg = await interaction.editReply({ content: `🔍 找到結果：`, components: [row] });
