@@ -1,6 +1,19 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
+// ... 其他 require ...
 const play = require('play-dl');
+
+// 💡 加入這段：讓機器人偽裝成已登入的使用者
+(async () => {
+    await play.setToken({
+        youtube: {
+            cookie: `這裡貼上你剛剛匯出的所有內容`
+        }
+    });
+    console.log("✅ YouTube Cookie 載入成功");
+})();
+
+// ... 剩下的代碼 ...
 
 // --- 1. 設定區 (從 Railway 或 .env 讀取) ---
 const TOKEN = process.env.TOKEN;
