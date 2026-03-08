@@ -85,16 +85,20 @@ client.on("interactionCreate", async interaction => {
             if (!results.length) return interaction.editReply("❌ 找不到相關音樂 (可能需要更新 ID)");
 
             // --- 修正後的選單代碼 ---
+            // 修正點：多重備援抓取曲名
             const selectMenu = new StringSelectMenuBuilder()
                 .setCustomId('select_song')
                 .setPlaceholder('🎵 請選擇歌曲播放...')
                 .addOptions(results.map(s => {
-                    // 確保 title 存在，如果不存在就給它一個預設名稱
-                    const safeTitle = (s.title || "未知曲名").toString();
+                    // 印出搜尋結果物件，方便你在 Railway 日誌查看結構
+                    // console.log("SoundCloud 搜尋結果結構:", s); 
+
+                    // 備援順序：s.title -> s.name -> s.id -> "未知曲名"
+                    const safeTitle = (s.title || s.name || `音軌 ID: ${s.id}` || "未知曲名").toString();
                     
                     return {
-                        label: safeTitle.substring(0, 100), // 現在安全了
-                        description: `時長: ${s.durationRaw || '未知'}`,
+                        label: safeTitle.substring(0, 100),
+                        description: `時長: ${s.durationRaw || '未知'} | 上傳者: ${s.user?.name || '匿名'}`,
                         value: s.url,
                     };
                 }));
