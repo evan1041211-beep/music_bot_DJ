@@ -12,17 +12,19 @@ const client = new Client({
 
 const queue = new Map();
 
-// --- 💡 修正 1: 安全載入 Cookie ---
+// --- 💡 修正：使用 Base64 解碼載入 Cookie ---
 (async () => {
     if (process.env.cookies) {
         try {
-            // 確保 Cookie 是正確的 JSON 格式
+            // 先讀取 Base64 亂碼，再轉回正常文字
+            const decodedCookie = Buffer.from(process.env.cookies, 'base64').toString('utf-8');
+            
             await play.setToken({
-                youtube: { cookie: process.env.cookies }
+                youtube: { cookie: decodedCookie.trim() }
             });
-            console.log("✅ YouTube Cookie 已成功載入");
+            console.log("✅ YouTube Cookie 已通過 Base64 解碼並載入");
         } catch (e) {
-            console.error("❌ Cookie 格式錯誤:", e.message);
+            console.error("❌ Cookie 解碼失敗，請檢查 Base64 格式:", e.message);
         }
     }
 })();
