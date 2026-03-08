@@ -68,6 +68,37 @@ client.on("interactionCreate", async i => {
             const query = options.getString("song");
             let songData;
 
+            // 1. 先檢查是不是網址
+            if (query.startsWith('http')) {
+                // 如果是 Spotify 連結
+                if (play.sp_validate(query)) {
+                    const sp = await play.spotify(query);
+                    // 注意：play.spotify 傳回的物件格式依據連結類型(track/album)有所不同
+                    songData = { title: sp.name || sp.tracks[0].name, url: query, isSp: true };
+                } 
+                // 如果是其他網址 (如 SoundCloud)
+                else {
+                    const info = await play.video_basic_info(query);
+                    songData = { title: info.video_details.title, url: query };
+                }
+            } 
+            // 2. 如果只是純文字關鍵字，直接走搜尋
+            else {
+                // 強制在 SoundCloud 搜尋，避開 YouTube 報錯
+                const res = await play.search(query, { limit: 1, source: { soundcloud: "tracks" } });
+                if (!res || !res.length) return i.editReply("❌ 在 SoundCloud 上找不到這首歌，請換個關鍵字試試。");
+                songData = { title: res[0].title, url: res[0].url };
+            }
+
+            serverQueue.songs.push(songData);
+            i.editReply(`✅ 已加入隊列: **${songData.title}**`);
+            if (serverQueue.songs.length === 1) playMusic(guild, serverQueue.songs[0]);
+
+        } catch (e) { 
+            console.error("搜尋過程出錯:", e.message);
+            i.editReply("❌ 搜尋失敗，可能是該網址格式不支援。"); 
+        }
+
             // 優先判斷是否為 Spotify
             if (play.sp_validate(query)) {
                 const sp = await play.spotify(query);
