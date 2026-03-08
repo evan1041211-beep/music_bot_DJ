@@ -10,7 +10,7 @@ const play = require('play-dl');
             cookie: `這裡貼上你剛剛匯出的所有內容`
         }
     });
-    console.log("✅ YouTube Cookie 載入成功");
+    console.log("cookies = process.env.cookies");
 })();
 
 // ... 剩下的代碼 ...
