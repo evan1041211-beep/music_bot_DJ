@@ -9,31 +9,24 @@ const GUILD_ID = process.env.GUILD_ID;
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const queue = new Map();
 
-// --- 1. 自動初始化服務 ---
-async function initializeServices() {
+// --- 1. 授權初始化 (僅 SoundCloud 手動模式) ---
+(async () => {
     try {
-        // 強制 play-dl 去抓取匿名 SoundCloud ID
-        await play.getFreeClientID();
-        
-        // 設定 Spotify (這部分仍需 Railway 變數)
         await play.setToken({
-            spotify: {
-                client_id: process.env.SPOTIFY_ID,
-                client_secret: process.env.SPOTIFY_SECRET,
-                market: 'TW'
+            soundcloud: {
+                client_id: process.env.SOUNDCLOUD_ID 
             }
         });
-        console.log("✅ 服務自動初始化成功");
+        console.log("✅ SoundCloud 服務授權成功 (純 SoundCloud 模式)");
     } catch (e) {
-        console.warn("⚠️ 自動獲取 ID 失敗，將在搜尋時再次嘗試:", e.message);
+        console.error("❌ 授權初始化失敗，請檢查 SOUNDCLOUD_ID:", e.message);
     }
-}
-initializeServices();
+})();
 
 // --- 2. 指令註冊 ---
 const commands = [
-    new SlashCommandBuilder().setName("play").setDescription("搜尋歌曲並選擇").addStringOption(o => o.setName("song").setDescription("輸入歌名").setRequired(true)),
-    new SlashCommandBuilder().setName("skip").setDescription("跳過歌曲"),
+    new SlashCommandBuilder().setName("play").setDescription("搜尋 SoundCloud 音樂").addStringOption(o => o.setName("song").setDescription("輸入歌名或歌手").setRequired(true)),
+    new SlashCommandBuilder().setName("skip").setDescription("跳過目前的歌曲"),
     new SlashCommandBuilder().setName("leave").setDescription("讓機器人離開")
 ].map(cmd => cmd.toJSON());
 
@@ -42,7 +35,7 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
         console.log("✅ 指令同步成功");
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error("❌ 指令同步失敗:", e); }
 })();
 
 // --- 3. 核心邏輯 ---
@@ -56,80 +49,67 @@ client.on("interactionCreate", async i => {
         await i.deferReply();
 
         try {
-            // --- 修正點：改用更安全的初始化 ---
-            try {
-                // 如果 play-dl 還沒準備好，這行會嘗試抓取必要的匿名 ID
-                await play.getFreeClientID(); 
-            } catch (err) {
-                console.warn("自動獲取 ID 失敗，嘗試直接搜尋...");
-            }
-
-            // 搜尋 SoundCloud 前 5 名
+            // 直接從 SoundCloud 搜尋前 5 名
             const results = await play.search(query, { limit: 5, source: { soundcloud: "tracks" } });
             
-            if (!results || !results.length) {
-                return i.editReply("❌ 找不到相關音樂，可能是服務暫時不可用。");
+            if (!results || results.length === 0) {
+                return i.editReply("❌ 在 SoundCloud 上找不到相關音樂，請更換關鍵字。");
             }
 
-            // 建立選單 (這部分保持不變)
+            // 建立選單
             const selectMenu = new StringSelectMenuBuilder()
                 .setCustomId('select_song')
-                .setPlaceholder('🎵 請從下方選一首歌播放...')
+                .setPlaceholder('🎵 請點擊此處選擇一首歌播放...')
                 .addOptions(results.map((song) => ({
                     label: song.title.substring(0, 100),
-                    description: `時長: ${song.durationRaw || '未知'}`,
+                    description: `歌手: ${song.user?.name || '未知'} | 時長: ${song.durationRaw}`,
                     value: song.url,
                 })));
 
             const row = new ActionRowBuilder().addComponents(selectMenu);
-            await i.editReply({ 
+            const response = await i.editReply({ 
                 content: `🔍 幫你找到了這些「${query}」的結果：`, 
                 components: [row] 
             });
 
-            // ... 後續的 Collector 代碼保持不變 ...
-
-            // 收集玩家的選擇
+            // 收集選擇
             const collector = response.createMessageComponentCollector({
                 componentType: ComponentType.StringSelect,
-                time: 30000 // 30 秒後過期
+                time: 30000 
             });
 
             collector.on('collect', async interaction => {
-                if (interaction.user.id !== i.user.id) {
-                    return interaction.reply({ content: "這不是你的選單！", ephemeral: true });
-                }
+                if (interaction.user.id !== i.user.id) return interaction.reply({ content: "這不是你的選單！", ephemeral: true });
                 
                 const selectedUrl = interaction.values[0];
                 const selectedSong = results.find(s => s.url === selectedUrl);
 
-                await interaction.update({ content: `✅ 準備播放: **${selectedSong.title}**`, components: [] });
+                await interaction.update({ content: `✅ 正在準備播放: **${selectedSong.title}**`, components: [] });
                 
-                startPlaying(guild, member, selectedSong);
+                addToQueue(guild, member, selectedSong);
             });
 
         } catch (e) {
             console.error("搜尋錯誤:", e);
-            i.editReply("❌ 搜尋失敗。這通常是伺服器 IP 被暫時阻擋，請稍後再試。");
+            i.editReply("❌ 搜尋失敗。這通常是 SOUNDCLOUD_ID 無效，請更新變數。");
         }
     }
 
     if (commandName === "skip") {
-        queue.get(guild.id)?.player.stop();
-        i.reply("⏭ 已跳過目前的歌曲");
+        const q = queue.get(guild.id);
+        if (q) { q.player.stop(); i.reply("⏭ 已跳過！"); }
+        else { i.reply("❌ 目前沒有正在播放的音樂。"); }
     }
 
     if (commandName === "leave") {
-        queue.get(guild.id)?.connection.destroy();
-        queue.delete(guild.id);
-        i.reply("👋 掰掰！下次見。");
+        const q = queue.get(guild.id);
+        if (q) { q.connection.destroy(); queue.delete(guild.id); i.reply("👋 掰掰！"); }
     }
 });
 
-// --- 4. 播放機制 ---
-async function startPlaying(guild, member, songData) {
+// --- 4. 播放管理 ---
+async function addToQueue(guild, member, songData) {
     let serverQueue = queue.get(guild.id);
-
     if (!serverQueue) {
         serverQueue = {
             connection: joinVoiceChannel({
@@ -143,7 +123,6 @@ async function startPlaying(guild, member, songData) {
         serverQueue.connection.subscribe(serverQueue.player);
         queue.set(guild.id, serverQueue);
     }
-
     serverQueue.songs.push(songData);
     if (serverQueue.songs.length === 1) playMusic(guild, serverQueue.songs[0]);
 }
@@ -162,11 +141,11 @@ async function playMusic(guild, song) {
             playMusic(guild, serverQueue.songs[0]);
         });
     } catch (e) {
-        console.error("播放出錯:", e.message);
+        console.error("播放失敗:", e.message);
         serverQueue.songs.shift();
         playMusic(guild, serverQueue.songs[0]);
     }
 }
 
-client.once("ready", () => console.log(`🎵 ${client.user.tag} 已就緒！`));
+client.once("ready", () => console.log(`🎵 ${client.user.tag} (純音質版) 已上線！`));
 client.login(TOKEN);
