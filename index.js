@@ -6,9 +6,12 @@ const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-// --- 1. Spotify 授權 ---
+// --- 1. 授權與 Token 初始化 ---
 (async () => {
     try {
+        // 強制初始化 SoundCloud 和其他平台的匿名 Token
+        await play.getFreeToken(); 
+        
         await play.setToken({
             spotify: {
                 client_id: process.env.SPOTIFY_ID,
@@ -16,15 +19,11 @@ const GUILD_ID = process.env.GUILD_ID;
                 market: 'TW'
             }
         });
-        console.log("✅ Spotify 服務已啟動");
+        console.log("✅ Spotify 與 基礎服務已啟動");
     } catch (e) {
-        console.error("❌ Spotify 啟動失敗:", e.message);
+        console.error("❌ 初始化失敗:", e.message);
     }
 })();
-
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
-const queue = new Map();
-
 // --- 2. 指令註冊 ---
 const commands = [
     new SlashCommandBuilder().setName("play").setDescription("播放音樂").addStringOption(o => o.setName("song").setDescription("歌名或連結").setRequired(true)),
