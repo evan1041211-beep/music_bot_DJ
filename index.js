@@ -56,15 +56,22 @@ client.on("interactionCreate", async i => {
         await i.deferReply();
 
         try {
-            // 搜尋前確保 ClientID 存在，若不存在則補抓
-            if (!play.token_list.soundcloud) await play.getFreeClientID();
+            // --- 修正點：改用更安全的初始化 ---
+            try {
+                // 如果 play-dl 還沒準備好，這行會嘗試抓取必要的匿名 ID
+                await play.getFreeClientID(); 
+            } catch (err) {
+                console.warn("自動獲取 ID 失敗，嘗試直接搜尋...");
+            }
 
             // 搜尋 SoundCloud 前 5 名
             const results = await play.search(query, { limit: 5, source: { soundcloud: "tracks" } });
             
-            if (!results.length) return i.editReply("❌ 找不到相關音樂，請嘗試更換關鍵字。");
+            if (!results || !results.length) {
+                return i.editReply("❌ 找不到相關音樂，可能是服務暫時不可用。");
+            }
 
-            // 建立下拉選單
+            // 建立選單 (這部分保持不變)
             const selectMenu = new StringSelectMenuBuilder()
                 .setCustomId('select_song')
                 .setPlaceholder('🎵 請從下方選一首歌播放...')
@@ -75,10 +82,12 @@ client.on("interactionCreate", async i => {
                 })));
 
             const row = new ActionRowBuilder().addComponents(selectMenu);
-            const response = await i.editReply({ 
+            await i.editReply({ 
                 content: `🔍 幫你找到了這些「${query}」的結果：`, 
                 components: [row] 
             });
+
+            // ... 後續的 Collector 代碼保持不變 ...
 
             // 收集玩家的選擇
             const collector = response.createMessageComponentCollector({
