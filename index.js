@@ -1,63 +1,57 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
-// ... 其他 require ...
 const play = require('play-dl');
 
-// 💡 加入這段：讓機器人偽裝成已登入的使用者
-(async () => {
-    await play.setToken({
-        youtube: {
-            cookie: `這裡貼上你剛剛匯出的所有內容`
-        }
-    });
-    console.log("cookies = process.env.cookies");
-})();
-
-// ... 剩下的代碼 ...
-
-// --- 1. 設定區 (從 Railway 或 .env 讀取) ---
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
 const client = new Client({ 
-    intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildVoiceStates,
-    ] 
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] 
 });
 
 const queue = new Map();
 
-// --- 2. 註冊音樂指令 ---
+// --- 💡 修正 1: 安全載入 Cookie ---
+(async () => {
+    if (process.env.cookies) {
+        try {
+            // 確保 Cookie 是正確的 JSON 格式
+            await play.setToken({
+                youtube: { cookie: process.env.cookies }
+            });
+            console.log("✅ YouTube Cookie 已成功載入");
+        } catch (e) {
+            console.error("❌ Cookie 格式錯誤:", e.message);
+        }
+    }
+})();
+
 const commands = [
-    new SlashCommandBuilder().setName("play").setDescription("播放 YouTube 音樂")
-        .addStringOption(o => o.setName("song").setDescription("輸入歌名或 YouTube 網址").setRequired(true)),
-    new SlashCommandBuilder().setName("skip").setDescription("跳過目前的歌曲"),
-    new SlashCommandBuilder().setName("stop").setDescription("停止播放並清空隊列"),
-    new SlashCommandBuilder().setName("leave").setDescription("讓機器人離開語音頻道")
+    new SlashCommandBuilder().setName("play").setDescription("播放 YouTube 音樂").addStringOption(o => o.setName("song").setDescription("歌名或網址").setRequired(true)),
+    new SlashCommandBuilder().setName("skip").setDescription("跳過"),
+    new SlashCommandBuilder().setName("leave").setDescription("離開")
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 (async () => {
     try {
         await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-        console.log("✅ 音樂指令已更新");
+        console.log("✅ 音樂指令已同步");
     } catch (e) { console.error(e); }
 })();
 
-// --- 3. 指令處理器 ---
 client.on("interactionCreate", async i => {
     if (!i.isChatInputCommand()) return;
     const { commandName, guild, member, options } = i;
 
     const voiceChannel = member.voice.channel;
-    if (!voiceChannel) return i.reply("❌ 你必須先進入語音頻道才能點歌！");
+    if (!voiceChannel) return i.reply("❌ 你必須先進入語音頻道！");
 
     let serverQueue = queue.get(guild.id);
 
     if (commandName === "play") {
-        await i.reply("🔍 正在搜尋 YouTube...");
+        await i.reply("🔍 正在搜尋...");
         
         if (!serverQueue) {
             serverQueue = {
@@ -75,10 +69,11 @@ client.on("interactionCreate", async i => {
 
         try {
             const query = options.getString("song");
-            // 搜尋 YouTube
             const res = await play.search(query, { limit: 1, source: { youtube: "video" } });
-            if (!res.length) return i.editReply("❌ 找不到音樂。");
+            
+            if (!res || res.length === 0) return i.editReply("❌ 找不到音樂。");
 
+            // 💡 修正 2: 確保 song 物件完整
             const song = { title: res[0].title, url: res[0].url };
             serverQueue.songs.push(song);
 
@@ -87,52 +82,50 @@ client.on("interactionCreate", async i => {
 
         } catch (e) {
             console.error(e);
-            i.editReply("❌ 播放出錯，請再試一次。");
+            i.editReply("❌ 搜尋發生錯誤。");
         }
     }
 
     if (commandName === "skip") {
-        if (!serverQueue) return i.reply("❌ 目前沒有正在播放的歌曲。");
-        serverQueue.player.stop();
-        i.reply("⏭ 已跳過！");
-    }
-
-    if (commandName === "stop") {
-        if (!serverQueue) return i.reply("❌ 目前沒有正在播放的歌曲。");
-        serverQueue.songs = [];
-        serverQueue.player.stop();
-        i.reply("⏹ 播放已停止。");
+        serverQueue?.player.stop();
+        i.reply("⏭ 已跳過");
     }
 
     if (commandName === "leave") {
-        if (!serverQueue) return i.reply("❌ 我不在語音頻道中。");
-        serverQueue.connection.destroy();
+        serverQueue?.connection.destroy();
         queue.delete(guild.id);
-        i.reply("👋 下次見！");
+        i.reply("👋 下次見");
     }
 });
 
-// --- 4. 播放函數 ---
+// --- 💡 修正 3: 加入網址檢查與播放邏輯 ---
 async function playMusic(guild, song) {
     const serverQueue = queue.get(guild.id);
-    if (!song) return; // 播完後留在頻道內不離開
+    if (!song || !song.url) {
+        console.log("🎵 隊列已空或網址無效");
+        return;
+    }
 
     try {
+        console.log(`🎶 正在播放: ${song.title}`);
         const stream = await play.stream(song.url, { discordPlayerCompatibility: true });
         const resource = createAudioResource(stream.stream, { inputType: stream.type });
+        
         serverQueue.player.play(resource);
 
-        // 當這首歌播完，自動播下一首
         serverQueue.player.once(AudioPlayerStatus.Idle, () => {
             serverQueue.songs.shift();
-            playMusic(guild, serverQueue.songs[0]);
+            if (serverQueue.songs.length > 0) {
+                playMusic(guild, serverQueue.songs[0]);
+            }
         });
     } catch (e) {
-        console.error("播放發生錯誤:", e);
+        console.error("播放發生錯誤:", e.message);
         serverQueue.songs.shift();
         playMusic(guild, serverQueue.songs[0]);
     }
 }
 
-client.once("ready", () => console.log(`🎵 音樂機器人 ${client.user.tag} 在線！`));
+// 💡 修正 4: 按照警告建議使用 clientReady
+client.once("clientReady", () => console.log(`🎵 ${client.user.tag} 已準備就緒！`));
 client.login(TOKEN);
