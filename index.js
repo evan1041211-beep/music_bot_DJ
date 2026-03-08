@@ -12,19 +12,23 @@ const client = new Client({
 
 const queue = new Map();
 
-// --- 💡 修正：使用 Base64 解碼載入 Cookie ---
+// --- 💡 終極修正：Base64 解碼 + 非法字元強制過濾 ---
 (async () => {
     if (process.env.cookies) {
         try {
-            // 先讀取 Base64 亂碼，再轉回正常文字
-            const decodedCookie = Buffer.from(process.env.cookies, 'base64').toString('utf-8');
-            
+            // 1. 解碼 Base64
+            let decodedCookie = Buffer.from(process.env.cookies, 'base64').toString('utf-8');
+
+            // 2. 強制過濾所有非 ASCII 或控制字元 (只保留可列印字元)
+            // 這能修復 "Invalid character in header content" 錯誤
+            const cleanCookie = decodedCookie.replace(/[^\x20-\x7E]/g, "");
+
             await play.setToken({
-                youtube: { cookie: decodedCookie.trim() }
+                youtube: { cookie: cleanCookie }
             });
-            console.log("✅ YouTube Cookie 已通過 Base64 解碼並載入");
+            console.log("✅ YouTube Cookie 已過濾非法字元並成功載入");
         } catch (e) {
-            console.error("❌ Cookie 解碼失敗，請檢查 Base64 格式:", e.message);
+            console.error("❌ Cookie 載入失敗:", e.message);
         }
     }
 })();
